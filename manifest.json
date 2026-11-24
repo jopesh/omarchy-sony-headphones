@@ -21,6 +21,7 @@
     "defaultSection": "right",
     "defaults": {
       "showBattery": "On",
+      "hideWhenDisconnected": "On",
       "address": ""
     },
     "schema": [
@@ -31,6 +32,14 @@
         "options": ["On", "Off"],
         "defaultValue": "On",
         "description": "Show the battery percentage next to the headphones icon."
+      },
+      {
+        "key": "hideWhenDisconnected",
+        "type": "enum",
+        "label": "Hide when disconnected",
+        "options": ["On", "Off"],
+        "defaultValue": "On",
+        "description": "Hide the headphones icon from the bar while no Sony headphones are connected."
       },
       {
         "key": "address",

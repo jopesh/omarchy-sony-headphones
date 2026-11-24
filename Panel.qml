@@ -19,12 +19,14 @@ Panel {
 
   // The value may arrive as a real boolean from a hand-edited shell.json or as
   // a string from `omarchy bar set`; accept either.
-  readonly property bool showBattery: {
-    var value = setting("showBattery", true)
+  function boolSetting(key, fallback) {
+    var value = setting(key, fallback)
     if (value === true || value === false) return value
     var text = String(value).toLowerCase()
     return !(text === "off" || text === "false" || text === "no" || text === "0")
   }
+  readonly property bool showBattery: boolSetting("showBattery", true)
+  readonly property bool hideWhenDisconnected: boolSetting("hideWhenDisconnected", true)
   readonly property string pinnedAddress: String(setting("address", ""))
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -163,6 +165,9 @@ Panel {
     return options
   }
 
+  // Stay out of the bar until a pair is connected; an open panel keeps its
+  // anchor so it does not vanish from under the pointer mid-reconnect.
+  visible: !hideWhenDisconnected || sony.connected || opened
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
