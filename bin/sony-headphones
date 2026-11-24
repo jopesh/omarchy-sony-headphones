@@ -4,8 +4,8 @@
 # Copyright (C) 2026 Gabriel Aramburu
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# The v1 ("MDR") wire protocol implemented here — payload opcodes, byte layouts
-# and their meaning — was reverse engineered by the Gadgetbridge project
+# The v1 ("MDR") and v2 wire protocols implemented here — payload opcodes, byte
+# layouts and their meaning — were reverse engineered by the Gadgetbridge project
 # (AGPL-3.0-or-later), with the message framing cross-checked against
 # SonyHeadphonesClient (MIT). See README.md for the full attribution.
 #
@@ -51,8 +51,11 @@ MSG_COMMAND_2 = 0x0E
 
 MAX_MESSAGE_SIZE = 2048
 
-# Sony's app SPP service. Used to recognise a device that speaks this protocol.
+# Sony's app SPP services. Used to recognise a device that speaks this protocol,
+# and which generation of it: v1 for the 1000X line up to the XM4, v2 from the
+# WH-1000XM5 on. A device advertises one or the other, never both.
 SERVICE_UUID = "96cc203e-5068-46ad-b32d-e316f5e069ba"
+SERVICE_UUID_V2 = "956c7b26-d49a-4ba8-b03f-b17d393cb6e2"
 
 
 class ProtocolError(Exception):
@@ -223,9 +226,13 @@ AUDIO_CODECS = {0x00: "unknown", 0x01: "SBC", 0x02: "AAC", 0x10: "LDAC", 0x20: "
 # attempt at disabling its touch panel, and answers "when taken off" to every
 # auto-power-off timer.
 FEATURE_SETS = {
-    "WH-1000XM4": {
+    "WH-1000XM5": {
         "battery", "equalizer", "dsee", "speak-to-chat", "pause-when-taken-off",
-        "voice-notifications", "auto-power-off", "nc-optimizer",
+        "voice-notifications", "auto-power-off",
+    },
+    "WH-1000XM4": {
+        "battery", "equalizer", "dsee", "speak-to-chat", "speak-to-chat-focus",
+        "pause-when-taken-off", "voice-notifications", "auto-power-off", "nc-optimizer",
     },
     "WH-1000XM3": {
         "battery", "equalizer", "dsee", "touch-sensor", "voice-notifications",
@@ -240,12 +247,16 @@ FEATURE_SETS = {
 # turns out to do nothing than to hide one that would have worked.
 ALL_FEATURES = set().union(*FEATURE_SETS.values()) | {"touch-sensor", "auto-power-off-timer"}
 
+# v2 carries fewer of those controls, and some only on some models; an
+# unrecognised v2 device gets what the WH-1000XM5 verified.
+V2_FEATURES = set(FEATURE_SETS["WH-1000XM5"])
 
-def features_for(name: str | None) -> list:
+
+def features_for(name: str | None, protocol: int = 1) -> list:
     for model, features in FEATURE_SETS.items():
         if model.lower() in str(name or "").lower():
             return sorted(features)
-    return sorted(ALL_FEATURES)
+    return sorted(V2_FEATURES if protocol == 2 else ALL_FEATURES)
 
 
 BATTERY_SINGLE = 0x00
@@ -262,8 +273,10 @@ def req(payload: bytes, msg_type: int = MSG_COMMAND_1) -> tuple[int, bytes]:
     return msg_type, payload
 
 
-def refresh_requests() -> list[tuple[int, bytes]]:
+def refresh_requests(protocol: int = 1) -> list[tuple[int, bytes]]:
     """Everything worth asking for after a connect, in display order."""
+    if protocol == 2:
+        return refresh_requests_v2()
     return [
         req(bytes([FW_VERSION_REQUEST, 0x02])),
         req(bytes([CODEC_GET, 0x00])),
@@ -385,6 +398,7 @@ def initial_state() -> dict:
         "touch_sensor": None,
         "voice_notifications": None,
         "nc_optimizer_pressure": None,
+        "protocol": None,
         "features": sorted(ALL_FEATURES),
         "error": None,
     }
@@ -399,6 +413,8 @@ def apply_payload(state: dict, msg_type: int, payload: bytes) -> bool:
     """
     if not payload:
         return False
+    if state.get("protocol") == 2:
+        return apply_payload_v2(state, msg_type, payload)
 
     before = dict(state)
     code = payload[0]
@@ -477,6 +493,229 @@ def apply_payload(state: dict, msg_type: int, payload: bytes) -> bool:
             state["nc_optimizer_pressure"] = pressure
 
     return state != before
+
+
+# ---------------------------------------------------------------------------
+# Protocol v2 (WH-1000XM5 and later)
+# ---------------------------------------------------------------------------
+#
+# Same framing, same handshake, and many of the same opcodes as v1, but the
+# sub-type bytes moved, several on/off flags are inverted (0x00 means on), and
+# battery, codec and auto power off got opcodes of their own. Byte layouts
+# follow Gadgetbridge's SonyProtocolImplV2 and were round-tripped on a
+# WH-1000XM5, firmware 2.5.1.
+
+V2_CODEC_GET = 0x12
+V2_CODEC_RET = 0x13
+V2_CODEC_NOTIFY = 0x15
+V2_BATTERY_GET = 0x22
+V2_BATTERY_RET = 0x23
+V2_POWER_SET = 0x24
+V2_BATTERY_NOTIFY = 0x25
+V2_APO_GET = 0x26
+V2_APO_RET = 0x27
+V2_APO_SET = 0x28
+V2_APO_NOTIFY = 0x29
+V2_APO_SUB = 0x05
+# Ambient sound control: 0x17 is the layout the XM5 answers with. Seven bytes
+# without a wind-noise byte, eight with one.
+V2_ASC_TYPE = 0x17
+V2_EQ_SUB = 0x00
+V2_UPSAMPLING_SUB_DSEE = 0x01
+# On v2 the old APO family (0xF6..) keeps pause-when-taken-off and the
+# speak-to-chat switch, and the old STC family (0xFA..) its config.
+V2_SUB_PAUSE_WHEN_TAKEN_OFF = 0x01
+V2_SUB_SPEAK_TO_CHAT = 0x0C
+V2_VOICE_SUB = 0x01
+# The touch panel lives in general-setting slot 0xD1 on the XM5 (the device
+# names it TOUCH_PANEL_SETTING when asked with `d0 d1`; 0xD2 is multipoint).
+# It is left out: `d8 d1 00 01` is acknowledged and the panel stays on.
+# Every v2 timer value is refused by the XM5, so these two are all it gets.
+V2_AUTO_POWER_OFF = {k: AUTO_POWER_OFF[k] for k in ("off", "when-taken-off")}
+V2_AUTO_POWER_OFF_FROM_CODE = {v: k for k, v in V2_AUTO_POWER_OFF.items()}
+
+
+def _inverted_bool(value: int):
+    """v2 flags read 0x00 for on and 0x01 for off."""
+    return {0x00: True, 0x01: False}.get(value)
+
+
+def refresh_requests_v2() -> list[tuple[int, bytes]]:
+    return [
+        req(bytes([FW_VERSION_REQUEST, 0x02])),
+        req(bytes([V2_CODEC_GET, 0x02])),
+        req(bytes([V2_BATTERY_GET, BATTERY_SINGLE])),
+        req(bytes([ASC_GET, V2_ASC_TYPE])),
+        req(bytes([EQUALIZER_GET, V2_EQ_SUB])),
+        req(bytes([UPSAMPLING_GET, V2_UPSAMPLING_SUB_DSEE])),
+        req(bytes([APO_GET, V2_SUB_SPEAK_TO_CHAT])),
+        req(bytes([STC_CONFIG_GET, V2_SUB_SPEAK_TO_CHAT])),
+        req(bytes([APO_GET, V2_SUB_PAUSE_WHEN_TAKEN_OFF])),
+        req(bytes([V2_APO_GET, V2_APO_SUB])),
+        req(bytes([VOICE_NOTIFICATIONS_GET, V2_VOICE_SUB]), MSG_COMMAND_2),
+    ]
+
+
+def battery_request(protocol: int = 1) -> tuple[int, bytes]:
+    return req(bytes([V2_BATTERY_GET if protocol == 2 else BATTERY_GET, BATTERY_SINGLE]))
+
+
+def power_off_request(protocol: int = 1) -> tuple[int, bytes]:
+    if protocol == 2:
+        return req(bytes([V2_POWER_SET, 0x03, 0x01]))
+    return req(bytes([POWER_OFF, 0x00]))
+
+
+def asc_request_v2(mode: str, level: int, focus_on_voice: bool, supports_wind: bool) -> tuple[int, bytes]:
+    if mode not in NC_MODES:
+        raise ValueError(f"unknown mode {mode!r}; expected one of {', '.join(NC_MODES)}")
+    if mode == "wind-noise-reduction" and not supports_wind:
+        raise ValueError("this device does not support wind noise reduction")
+    level = max(0, min(MAX_AMBIENT_LEVEL, int(level)))
+    payload = bytearray([ASC_SET, V2_ASC_TYPE, 0x01])
+    payload.append(0x00 if mode == "off" else 0x01)
+    payload.append(0x01 if mode == "ambient-sound" else 0x00)
+    if supports_wind:
+        payload.append(0x03 if mode == "wind-noise-reduction" else 0x02)
+    payload.append(0x01 if focus_on_voice else 0x00)
+    # Unlike v1, the level is sent in every mode: the device keeps it for the
+    # next time ambient sound is switched on.
+    payload.append(level)
+    return req(bytes(payload))
+
+
+def apply_payload_v2(state: dict, msg_type: int, payload: bytes) -> bool:
+    before = dict(state)
+    code = payload[0]
+
+    if msg_type == MSG_COMMAND_2:
+        # A reply is `47 01 <flag> 01`, a notification `49 01 <flag>`.
+        if code in (VOICE_NOTIFICATIONS_RET, VOICE_NOTIFICATIONS_NOTIFY) and len(payload) in (3, 4) \
+                and payload[1] == V2_VOICE_SUB:
+            state["voice_notifications"] = _inverted_bool(payload[2])
+        return state != before
+
+    if code == FW_VERSION_REPLY and len(payload) >= 4 and payload[1] == 0x02:
+        version = payload[3:].decode("ascii", "replace")
+        if re.fullmatch(r"[0-9.\-a-zA-Z_]+", version):
+            state["firmware"] = version
+
+    elif code in (V2_CODEC_RET, V2_CODEC_NOTIFY) and len(payload) == 3 and payload[1] == 0x02:
+        state["codec"] = AUDIO_CODECS.get(payload[2], f"0x{payload[2]:02x}")
+
+    elif code in (V2_BATTERY_RET, V2_BATTERY_NOTIFY) and len(payload) >= 4 and payload[1] == BATTERY_SINGLE:
+        if 0 <= payload[2] <= 100:
+            state["battery"] = payload[2]
+            state["charging"] = payload[3] == 0x01
+
+    elif code in (ASC_RET, ASC_NOTIFY) and len(payload) in (7, 8) and payload[1] in (0x15, V2_ASC_TYPE):
+        supports_wind = len(payload) == 8
+        if payload[3] == 0x00:
+            mode = "off"
+        elif payload[3] != 0x01:
+            mode = None
+        elif supports_wind and payload[5] in (0x03, 0x05):
+            mode = "wind-noise-reduction"
+        else:
+            mode = {0x00: "noise-cancelling", 0x01: "ambient-sound"}.get(payload[4])
+        if mode is not None:
+            state["supports_wind"] = supports_wind
+            state["nc_mode"] = mode
+            state["focus_on_voice"] = _bool(payload[-2])
+            # In noise cancelling an XM5 reports a level byte with no meaning
+            # (0x96); keep the last real one so the slider remembers it.
+            if 0 <= payload[-1] <= MAX_AMBIENT_LEVEL:
+                state["ambient_level"] = payload[-1]
+
+    elif code in (EQUALIZER_RET, EQUALIZER_NOTIFY) and len(payload) == 10 and payload[1] == V2_EQ_SUB:
+        preset = EQ_PRESET_FROM_CODE.get(payload[2])
+        if preset is not None:
+            state["eq_preset"] = preset
+            state["eq_bass"] = payload[4] - 10
+            state["eq_bands"] = [payload[5 + i] - 10 for i in range(5)]
+
+    elif code in (UPSAMPLING_RET, UPSAMPLING_NOTIFY) and len(payload) == 3 \
+            and payload[1] == V2_UPSAMPLING_SUB_DSEE:
+        state["dsee"] = _bool(payload[2])
+
+    elif code in (V2_APO_RET, V2_APO_NOTIFY) and len(payload) == 4 and payload[1] == V2_APO_SUB:
+        value = V2_AUTO_POWER_OFF_FROM_CODE.get((payload[2], payload[3]))
+        if value is not None:
+            state["auto_power_off"] = value
+
+    elif code in (APO_RET, APO_NOTIFY) and len(payload) >= 3:
+        if payload[1] == V2_SUB_PAUSE_WHEN_TAKEN_OFF and len(payload) == 3:
+            state["pause_when_taken_off"] = _inverted_bool(payload[2])
+        elif payload[1] == V2_SUB_SPEAK_TO_CHAT and len(payload) == 4:
+            state["speak_to_chat"] = _inverted_bool(payload[2])
+
+    elif code in (STC_CONFIG_RET, STC_CONFIG_NOTIFY) and len(payload) == 4 and payload[1] == V2_SUB_SPEAK_TO_CHAT:
+        sensitivity = STC_SENSITIVITY_FROM_CODE.get(payload[2])
+        timeout = STC_TIMEOUT_FROM_CODE.get(payload[3])
+        if sensitivity is not None and timeout is not None:
+            state["stc_sensitivity"] = sensitivity
+            state["stc_timeout"] = timeout
+
+    return state != before
+
+
+def setting_requests_v2(state: dict, key: str, value, mode: str, level: int, focus: bool,
+                        supports_wind: bool) -> list[tuple[int, bytes]]:
+    def flag(enabled: bool) -> int:
+        return 0x00 if enabled else 0x01
+
+    if key == "nc":
+        mode = next_nc_mode(mode) if str(value) == "cycle" else str(value)
+        return [asc_request_v2(mode, level, focus, supports_wind)]
+    # Level and voice focus only take effect in ambient sound; with noise
+    # control off an XM5 acknowledges them and changes nothing.
+    if key == "ambient-level":
+        return [asc_request_v2("ambient-sound", int(value), focus, supports_wind)]
+    if key == "focus-on-voice":
+        return [asc_request_v2("ambient-sound", level, parse_bool(value, focus), supports_wind)]
+    if key == "eq":
+        preset = str(value)
+        if preset not in EQ_PRESETS:
+            raise ValueError(f"unknown equalizer preset {preset!r}")
+        return [req(bytes([EQUALIZER_SET, V2_EQ_SUB, EQ_PRESETS[preset], 0x00]))]
+    if key == "eq-bands":
+        numbers = [int(v) for v in re.split(r"[,\s]+", str(value).strip()) if v]
+        if len(numbers) != 6 or any(n < -10 or n > 10 for n in numbers):
+            raise ValueError("eq-bands takes 6 values: clear-bass and 5 bands, each -10..10")
+        return [req(bytes([EQUALIZER_SET, V2_EQ_SUB, EQ_PRESETS["manual"], 0x06] + [n + 10 for n in numbers]))]
+    if key == "dsee":
+        enabled = parse_bool(value, state.get("dsee"))
+        return [req(bytes([UPSAMPLING_SET, V2_UPSAMPLING_SUB_DSEE, 0x01 if enabled else 0x00]))]
+    if key == "speak-to-chat":
+        enabled = parse_bool(value, state.get("speak_to_chat"))
+        return [req(bytes([APO_SET, V2_SUB_SPEAK_TO_CHAT, flag(enabled), 0x01]))]
+    if key in ("stc-sensitivity", "stc-timeout"):
+        sensitivity = state.get("stc_sensitivity") or "auto"
+        timeout = state.get("stc_timeout") or "standard"
+        if key == "stc-sensitivity":
+            sensitivity = str(value)
+        else:
+            timeout = str(value)
+        if sensitivity not in STC_SENSITIVITY:
+            raise ValueError(f"unknown speak-to-chat sensitivity {sensitivity!r}")
+        if timeout not in STC_TIMEOUT:
+            raise ValueError(f"unknown speak-to-chat timeout {timeout!r}")
+        return [req(bytes([STC_CONFIG_SET, V2_SUB_SPEAK_TO_CHAT,
+                           STC_SENSITIVITY[sensitivity], STC_TIMEOUT[timeout]]))]
+    if key == "pause-when-taken-off":
+        enabled = parse_bool(value, state.get("pause_when_taken_off"))
+        return [req(bytes([APO_SET, V2_SUB_PAUSE_WHEN_TAKEN_OFF, flag(enabled)]))]
+    if key == "auto-power-off":
+        if str(value) not in V2_AUTO_POWER_OFF:
+            raise ValueError(f"unknown auto power off value {value!r}")
+        c0, c1 = V2_AUTO_POWER_OFF[str(value)]
+        return [req(bytes([V2_APO_SET, V2_APO_SUB, c0, c1]))]
+    if key == "voice-notifications":
+        enabled = parse_bool(value, state.get("voice_notifications"))
+        return [req(bytes([VOICE_NOTIFICATIONS_SET, V2_VOICE_SUB, flag(enabled)]), MSG_COMMAND_2)]
+    if key in SETTING_KEYS:
+        raise ValueError(f"{state.get('name') or 'this device'} does not support {key}")
+    raise ValueError(f"unknown setting {key!r}; expected one of {', '.join(SETTING_KEYS)}")
 
 
 # ---------------------------------------------------------------------------
@@ -736,9 +975,11 @@ def connected_devices() -> list[dict]:
             continue
         address = parts[1]
         name = parts[2].strip() if len(parts) > 2 else address
-        info = bluetoothctl("info", address)
-        if SERVICE_UUID in info.lower():
-            devices.append({"address": address, "name": name})
+        info = bluetoothctl("info", address).lower()
+        if SERVICE_UUID in info:
+            devices.append({"address": address, "name": name, "protocol": 1})
+        elif SERVICE_UUID_V2 in info:
+            devices.append({"address": address, "name": name, "protocol": 2})
     return devices
 
 
@@ -839,11 +1080,13 @@ class Link:
     # stand-in device answers inside write() itself.
     answers_immediately = False
 
-    def __init__(self, address: str, on_change=None):
+    def __init__(self, address: str, on_change=None, protocol: int = 1):
         self.address = address
         self.on_change = on_change
+        self.protocol = protocol
         self.state = initial_state()
         self.state["address"] = address
+        self.state["protocol"] = protocol
         self.sock: socket.socket | None = None
         self.seq = 0
         self._buffer = bytearray()
@@ -870,7 +1113,8 @@ class Link:
         unavailable but the channel has not moved.
         """
         candidates = []
-        discovered = sdp_channel(self.address)
+        uuid = SERVICE_UUID_V2 if self.protocol == 2 else SERVICE_UUID
+        discovered = sdp_channel(self.address, bytes.fromhex(uuid.replace("-", "")))
         if discovered:
             candidates.append(discovered)
         known = cached_channel(self.address)
@@ -914,10 +1158,9 @@ class Link:
     def _handshake(self) -> bool:
         """Send INIT and wait for the device to identify itself.
 
-        A four-byte init reply means protocol v1, which is what this plugin
-        speaks. Eight bytes means v2 (WF-1000XM4, XM5, LinkBuds, CH720N…) —
-        a different command set entirely, so say so rather than send v1 bytes
-        at a device that will ignore them.
+        A four-byte init reply means protocol v1, eight bytes means v2. The
+        service UUID already told us which to expect; a reply that disagrees
+        is refused rather than answered in the wrong dialect.
 
         The headphones sometimes ignore the first INIT of a session, usually
         just after a previous one closed, so ask again rather than declaring
@@ -937,11 +1180,12 @@ class Link:
                     continue
                 self._ack(seq)
                 if payload and payload[0] == INIT_REPLY:
-                    if len(payload) == 4:
+                    spoken = 1 if len(payload) == 4 else 2
+                    if spoken == self.protocol:
                         return True
                     raise NotConnected(
-                        "this device speaks Sony's v2 protocol, which this plugin "
-                        "does not implement yet (v1 devices only: WH-1000XM2/XM3/XM4)"
+                        f"expected Sony's v{self.protocol} protocol, but the device "
+                        f"answered in v{spoken}"
                     )
                 self.dispatch(msg_type, payload)
         return False
@@ -1067,7 +1311,7 @@ class Link:
         self.pump(settle)
 
     def refresh(self) -> dict:
-        self.request(refresh_requests(), settle=0.6)
+        self.request(refresh_requests(self.protocol), settle=0.6)
         return self.state
 
 
@@ -1117,7 +1361,7 @@ SETTING_FEATURES = {
     "speak-to-chat": "speak-to-chat",
     "stc-sensitivity": "speak-to-chat",
     "stc-timeout": "speak-to-chat",
-    "stc-focus-on-voice": "speak-to-chat",
+    "stc-focus-on-voice": "speak-to-chat-focus",
     "pause-when-taken-off": "pause-when-taken-off",
     "touch-sensor": "touch-sensor",
     "voice-notifications": "voice-notifications",
@@ -1143,6 +1387,9 @@ def setting_requests(state: dict, key: str, value) -> list[tuple[int, bytes]]:
     level = state.get("ambient_level")
     level = MAX_AMBIENT_LEVEL if level is None else level
     focus = bool(state.get("focus_on_voice"))
+
+    if state.get("protocol") == 2:
+        return setting_requests_v2(state, key, value, mode, level, focus, supports_wind)
 
     if key == "nc":
         mode = next_nc_mode(mode) if str(value) == "cycle" else str(value)
@@ -1512,9 +1759,9 @@ class Daemon:
             self.publish()
             return
 
-        link = Link(device["address"], on_change=self.publish)
+        link = Link(device["address"], on_change=self.publish, protocol=device["protocol"])
         link.state["name"] = device["name"]
-        link.state["features"] = features_for(device["name"])
+        link.state["features"] = features_for(device["name"], device["protocol"])
         try:
             link.connect()
             link.refresh()
@@ -1574,7 +1821,7 @@ class Daemon:
             "set": lambda link: apply_setting(link, str(request.get("key", "")), request.get("value")),
             "cycle": lambda link: apply_setting(link, "nc", "cycle"),
             "refresh": lambda link: link.refresh(),
-            "power-off": lambda link: link.write(MSG_COMMAND_1, bytes([POWER_OFF, 0x00])),
+            "power-off": lambda link: link.write(*power_off_request(link.protocol)),
         }
         action = actions.get(command)
         if action is None:
@@ -1746,7 +1993,7 @@ class Daemon:
                     self.next_poll = time.monotonic() + self.POLL_INTERVAL
                     heard = self.link.last_rx
                     try:
-                        self.link.request([req(bytes([BATTERY_GET, BATTERY_SINGLE]))], settle=1.0)
+                        self.link.request([battery_request(self.link.protocol)], settle=1.0)
                     except (NotConnected, OSError) as exc:
                         self.lose_link(str(exc))
                     else:
@@ -1840,9 +2087,9 @@ def direct(request: dict, preferred: str | None) -> dict:
         state["error"] = "no connected Sony headphones found"
         return {"ok": False, "error": state["error"], "state": state}
 
-    link = Link(device["address"])
+    link = Link(device["address"], protocol=device["protocol"])
     link.state["name"] = device["name"]
-    link.state["features"] = features_for(device["name"])
+    link.state["features"] = features_for(device["name"], device["protocol"])
     try:
         link.connect()
         link.refresh()
@@ -1852,7 +2099,7 @@ def direct(request: dict, preferred: str | None) -> dict:
         elif command == "cycle":
             apply_setting(link, "nc", "cycle")
         elif command == "power-off":
-            link.write(MSG_COMMAND_1, bytes([POWER_OFF, 0x00]))
+            link.write(*power_off_request(link.protocol))
         return {"ok": True, "state": link.state}
     except ValueError as exc:
         return {"ok": False, "error": str(exc), "state": link.state}
@@ -1998,9 +2245,9 @@ def cmd_probe(args) -> int:
         print(f"  cached channel:  {cached_channel(device['address']) or '-'}")
 
     device = find_device(args.address) or devices[0]
-    link = Link(device["address"])
+    link = Link(device["address"], protocol=device["protocol"])
     link.state["name"] = device["name"]
-    link.state["features"] = features_for(device["name"])
+    link.state["features"] = features_for(device["name"], device["protocol"])
     started = time.monotonic()
     try:
         channel = link.connect()

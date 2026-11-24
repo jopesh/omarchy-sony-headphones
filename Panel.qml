@@ -41,6 +41,11 @@ Panel {
   readonly property var features: sony.state.features || []
   function supports(feature) { return Model.supports(features, feature) }
 
+  // The ambient level and voice focus apply in ambient sound, and on v1 models
+  // also while noise control is off; v2 models ignore them when off.
+  readonly property bool ambientControls: sony.mode === "ambient-sound"
+    || (sony.mode === "off" && sony.state.protocol !== 2)
+
   property int cursorIndex: -1
   property bool cursorActive: false
   property real wheelAccumulator: 0
@@ -62,7 +67,7 @@ Panel {
   readonly property var rows: {
     if (!sony.connected) return []
     var list = ["mode"]
-    if (sony.mode === "ambient-sound" || sony.mode === "off") {
+    if (root.ambientControls) {
       list.push("level")
       list.push("focus")
     }
@@ -73,7 +78,7 @@ Panel {
       if (sony.state.speak_to_chat) {
         list.push("stc-sensitivity")
         list.push("stc-timeout")
-        list.push("stc-focus")
+        if (supports("speak-to-chat-focus")) list.push("stc-focus")
       }
     }
     if (supports("pause-when-taken-off")) list.push("pause")
@@ -196,8 +201,9 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: Model.barText(sony.state, root.showBattery, root.vertical)
-    slotSize: Style.bar.iconSlot * (root.showBattery && !root.vertical && sony.connected ? 2 : 1)
+    text: Model.barIcon(sony.state)
+    labelText: Model.barLabel(sony.state, root.showBattery, root.vertical)
+    slotSize: Style.bar.iconSlot * (labelText !== "" ? 2 : 1)
     tooltipText: Model.tooltip(sony.state)
     foreground: sony.connected ? root.barForeground : Qt.darker(root.barForeground, 1.6)
 
@@ -327,7 +333,7 @@ Panel {
             }
 
             CursorSurface {
-              visible: sony.mode === "ambient-sound" || sony.mode === "off"
+              visible: root.ambientControls
               width: parent.width
               hasCursor: root.hasCursorFor("level")
               foreground: root.foreground
@@ -380,7 +386,7 @@ Panel {
             }
 
             ToggleRow {
-              visible: sony.mode === "ambient-sound" || sony.mode === "off"
+              visible: root.ambientControls
               rowKey: "focus"
               label: "Focus on voice"
               hint: "Let voices through, filter the rest"
@@ -469,7 +475,7 @@ Panel {
 
             ToggleRow {
               rowKey: "stc-focus"
-              visible: !!sony.state.speak_to_chat
+              visible: !!sony.state.speak_to_chat && root.supports("speak-to-chat-focus")
               label: "Voice focus while chatting"
               checked: !!sony.state.stc_focus_on_voice
             }

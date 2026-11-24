@@ -108,11 +108,15 @@ function heroMeta(state) {
   return parts.join(" · ")
 }
 
-function barText(state, showBattery, vertical) {
-  var icon = modeIcon(state ? state.nc_mode : null, state && state.connected)
-  if (!showBattery || vertical || !state || !state.connected) return icon
-  var battery = batteryText(state.battery, false)
-  return battery === "" ? icon : battery + " " + icon
+// The glyph and the percentage go to the bar button separately: the glyph is
+// fitted to the shared icon size, and the label keeps the bar's text size.
+function barIcon(state) {
+  return modeIcon(state ? state.nc_mode : null, state && state.connected)
+}
+
+function barLabel(state, showBattery, vertical) {
+  if (!showBattery || vertical || !state || !state.connected) return ""
+  return batteryText(state.battery, false)
 }
 
 function tooltip(state) {

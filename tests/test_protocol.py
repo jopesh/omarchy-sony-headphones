@@ -979,5 +979,122 @@ class TestShellLaunch(unittest.TestCase):
             self.assertEqual(handle.readline().strip(), "#!/usr/bin/python3")
 
 
+class TestProtocolV2(unittest.TestCase):
+    """Frames captured from a WH-1000XM5, firmware 2.5.1."""
+
+    def state(self):
+        state = sonyhp.initial_state()
+        state["protocol"] = 2
+        state["name"] = "WH-1000XM5"
+        state["features"] = sonyhp.features_for("WH-1000XM5", 2)
+        return state
+
+    def fold(self, state, hex_payload, msg_type=None):
+        msg_type = sonyhp.MSG_COMMAND_1 if msg_type is None else msg_type
+        return sonyhp.apply_payload(state, msg_type, bytes.fromhex(hex_payload))
+
+    def requests(self, state, key, value):
+        return [(t, p.hex()) for t, p in sonyhp.setting_requests(state, key, value)]
+
+    def test_refresh_reads_every_v2_setting(self):
+        sent = {(t, p.hex()) for t, p in sonyhp.refresh_requests(2)}
+        for expected in ("0402", "1202", "2200", "6617", "5600", "e601", "f60c", "fa0c", "f601", "2605"):
+            self.assertIn((sonyhp.MSG_COMMAND_1, expected), sent)
+        self.assertIn((sonyhp.MSG_COMMAND_2, "4601"), sent)
+
+    def test_replies_fold_into_state(self):
+        state = self.state()
+        for frame in ("05020532 2e352e31", "130210", "23004900", "67170101010114",
+                      "570000060a0a0a0a0a0a", "e70100", "f70c0001", "fb0c0001", "f70100", "27051000"):
+            self.fold(state, frame.replace(" ", ""))
+        self.fold(state, "47010001", sonyhp.MSG_COMMAND_2)
+        self.assertEqual(state["firmware"], "2.5.1")
+        self.assertEqual(state["codec"], "LDAC")
+        self.assertEqual((state["battery"], state["charging"]), (73, False))
+        self.assertEqual((state["nc_mode"], state["ambient_level"], state["focus_on_voice"]), ("ambient-sound", 20, True))
+        self.assertFalse(state["supports_wind"])
+        self.assertEqual(state["eq_preset"], "off")
+        self.assertFalse(state["dsee"])
+        self.assertTrue(state["speak_to_chat"])
+        self.assertEqual((state["stc_sensitivity"], state["stc_timeout"]), ("auto", "standard"))
+        self.assertTrue(state["pause_when_taken_off"])
+        self.assertEqual(state["auto_power_off"], "when-taken-off")
+        self.assertTrue(state["voice_notifications"])
+
+    def test_inverted_flags_read_off(self):
+        state = self.state()
+        self.fold(state, "f90c0101")
+        self.fold(state, "f90101")
+        self.fold(state, "490101", sonyhp.MSG_COMMAND_2)
+        self.assertFalse(state["speak_to_chat"])
+        self.assertFalse(state["pause_when_taken_off"])
+        self.assertFalse(state["voice_notifications"])
+
+    def test_noise_cancelling_keeps_the_last_real_level(self):
+        state = self.state()
+        self.fold(state, "6917010101010c")
+        self.fold(state, "69170101000196")
+        self.assertEqual(state["nc_mode"], "noise-cancelling")
+        self.assertEqual(state["ambient_level"], 12)
+
+    def test_off_and_wind_modes(self):
+        state = self.state()
+        self.fold(state, "69170100000114")
+        self.assertEqual(state["nc_mode"], "off")
+        self.fold(state, "6917010100030114")
+        self.assertEqual(state["nc_mode"], "wind-noise-reduction")
+        self.assertTrue(state["supports_wind"])
+
+    def test_requests_match_the_verified_bytes(self):
+        state = self.state()
+        self.fold(state, "67170101010114")
+        C1, C2 = sonyhp.MSG_COMMAND_1, sonyhp.MSG_COMMAND_2
+        self.assertEqual(self.requests(state, "nc", "noise-cancelling"), [(C1, "68170101000114")])
+        self.assertEqual(self.requests(state, "nc", "off"), [(C1, "68170100000114")])
+        self.assertEqual(self.requests(state, "ambient-level", 12), [(C1, "6817010101010c")])
+        self.assertEqual(self.requests(state, "eq", "bass-boost"), [(C1, "58001600")])
+        self.assertEqual(self.requests(state, "eq-bands", "1,2,3,4,5,6"), [(C1, "5800a0060b0c0d0e0f10")])
+        self.assertEqual(self.requests(state, "dsee", "on"), [(C1, "e80101")])
+        self.assertEqual(self.requests(state, "speak-to-chat", "off"), [(C1, "f80c0101")])
+        self.assertEqual(self.requests(state, "stc-timeout", "long"), [(C1, "fc0c0002")])
+        self.assertEqual(self.requests(state, "pause-when-taken-off", "off"), [(C1, "f80101")])
+        self.assertEqual(self.requests(state, "auto-power-off", "off"), [(C1, "28051100")])
+        self.assertEqual(self.requests(state, "voice-notifications", "off"), [(C2, "480101")])
+
+    def test_level_and_focus_switch_out_of_off(self):
+        state = self.state()
+        self.fold(state, "69170100000114")
+        self.assertEqual(self.requests(state, "ambient-level", 5), [(sonyhp.MSG_COMMAND_1, "68170101010105")])
+
+    def test_unsupported_settings_are_refused(self):
+        state = self.state()
+        for key, value in (("stc-focus-on-voice", "on"), ("touch-sensor", "on")):
+            with self.assertRaises(ValueError):
+                sonyhp.setting_requests(state, key, value)
+        with self.assertRaises(ValueError):
+            sonyhp.setting_requests(state, "auto-power-off", "30-min")
+
+    def test_power_off_and_battery_use_v2_opcodes(self):
+        self.assertEqual(sonyhp.power_off_request(2), (sonyhp.MSG_COMMAND_1, bytes([0x24, 0x03, 0x01])))
+        self.assertEqual(sonyhp.battery_request(2), (sonyhp.MSG_COMMAND_1, bytes([0x22, 0x00])))
+
+    def test_features(self):
+        self.assertNotIn("speak-to-chat-focus", sonyhp.features_for("WH-1000XM5", 2))
+        self.assertIn("speak-to-chat-focus", sonyhp.features_for("WH-1000XM4", 1))
+        self.assertEqual(sonyhp.features_for("WH-1000XM6", 2), sorted(sonyhp.V2_FEATURES))
+
+    def test_v2_devices_are_recognised_by_their_service(self):
+        info = "Device 58:18:62:5A:F2:1A WH-1000XM5\n\tUUID: Vendor specific (956c7b26-d49a-4ba8-b03f-b17d393cb6e2)\n"
+
+        def fake(*args, **kwargs):
+            if args[0] == "devices":
+                return "Device 58:18:62:5A:F2:1A WH-1000XM5\n"
+            return info
+
+        with mock.patch.object(sonyhp, "bluetoothctl", side_effect=fake):
+            self.assertEqual(sonyhp.connected_devices(),
+                             [{"address": "58:18:62:5A:F2:1A", "name": "WH-1000XM5", "protocol": 2}])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

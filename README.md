@@ -59,21 +59,25 @@ changes a setting on the headphones unless you ask it to.
 
 ## Supported models
 
-The plugin speaks Sony's **v1** protocol, used by the over-ear 1000X line up to
-the XM4:
+The plugin speaks both generations of Sony's protocol: **v1**, used by the
+over-ear 1000X line up to the XM4, and **v2**, used from the WH-1000XM5 on.
 
 | Model | Status |
 |---|---|
+| WH-1000XM5 | Verified on hardware, firmware 2.5.1 — every setting it offers round-tripped |
 | WH-1000XM4 | Verified on hardware, firmware 3.0.1 — every setting below round-tripped |
-| WH-1000XM3, WH-1000XM2 | Same protocol, untested — reports welcome |
-| WF-1000XM4/XM5, WH-1000XM5/XM6, LinkBuds, CH720N | **Not supported.** These speak the v2 protocol; the plugin detects them and says so instead of sending bytes they will ignore |
+| WH-1000XM3, WH-1000XM2 | Same protocol as the XM4, untested — reports welcome |
+| WH-1000XM6, WF-1000XM4/XM5, LinkBuds, CH720N | v2, untested. They get the XM5's controls; earbuds show one battery, not each bud and the case |
 
 Each model honours a different subset, so the panel only draws the rows that
 model actually accepts — a control that silently does nothing is worse than one
 that is not offered. On a WH-1000XM4 that means no touch-panel switch and no
 auto-power-off timers: the headphones answer "still on" and "when taken off" to
-every such request, whatever you send them. A model this plugin does not
-recognise is offered everything.
+every such request, whatever you send them. On a WH-1000XM5 it means no
+touch-panel switch (the XM5 acknowledges turning it off and keeps it on), no
+auto-power-off timers, no voice focus for Speak-to-Chat and no NC optimizer,
+and the ambient level only applies in ambient sound. A v1
+model this plugin does not recognise is offered everything.
 
 ## What you can change
 
@@ -210,9 +214,10 @@ after changing it.
 
 ## Credits
 
-The v1 protocol — payload opcodes, byte layouts, and what each field means —
-was reverse engineered by [Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge),
-whose `SonyProtocolImplV1` is the reference this implementation follows. The
+The v1 and v2 protocols — payload opcodes, byte layouts, and what each field
+means — were reverse engineered by [Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge),
+whose `SonyProtocolImplV1` and `SonyProtocolImplV2` are the references this
+implementation follows. The
 message framing was cross-checked against
 [SonyHeadphonesClient](https://github.com/Plutoberth/SonyHeadphonesClient) and
 [SonyBridge](https://github.com/AmitRajput-Dev/SonyBridge), and the RFCOMM
